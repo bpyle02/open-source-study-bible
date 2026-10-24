@@ -1,4 +1,4 @@
 __pycache__/
-/markup/*
+markup/*.json.gz
 cache/*
-old files/
+old files/*
