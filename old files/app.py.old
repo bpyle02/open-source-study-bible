@@ -1,0 +1,123 @@
+import os
+import re
+import json
+import urllib.request
+from flask import Flask, render_template, jsonify
+
+app = Flask(__name__)
+
+BIBLE_FILE = 'bsb.txt'
+BIBLE_URL = 'https://bereanbible.com/bsb.txt'
+COMMENTARIES_DIR = 'commentaries_json'
+
+# In-memory structure: { "Genesis": { 1: { 1: "In the beginning...", ... } } }
+BIBLE_DATA = {}
+BOOK_ORDER = []
+
+def load_bible():
+    """Downloads bsb.txt if missing and parses it into a nested dictionary."""
+    if not os.path.exists(BIBLE_FILE):
+        print(f"Downloading {BIBLE_FILE} from {BIBLE_URL}...")
+        req = urllib.request.Request(BIBLE_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response, open(BIBLE_FILE, 'wb') as out_file:
+            out_file.write(response.read())
+
+    # Matches standard BSB line format: "Genesis 1:1\tIn the beginning..."
+    verse_pattern = re.compile(r'^([1-3]?\s?[A-Za-z\s]+)\s+(\d+):(\d+)\t(.*)$')
+
+    with open(BIBLE_FILE, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            line = line.strip()
+            match = verse_pattern.match(line)
+            if match:
+                book, chapter, verse, text = match.groups()
+                book = book.strip()
+                chapter = int(chapter)
+                verse = int(verse)
+
+                if book not in BIBLE_DATA:
+                    BIBLE_DATA[book] = {}
+                    BOOK_ORDER.append(book)
+                if chapter not in BIBLE_DATA[book]:
+                    BIBLE_DATA[book][chapter] = {}
+
+                BIBLE_DATA[book][chapter][verse] = text
+
+load_bible()
+
+def normalize_book_name(book_name):
+    """
+    Converts '1 Samuel' -> ['1_samuel', '1samuel']
+    Also ensures 'Psalms' matches both '_psalms' and '_psalm'.
+    """
+    clean = book_name.lower().strip()
+    variants = {
+        clean.replace(' ', '_'),
+        clean.replace(' ', '')
+    }
+    if clean in ('psalm', 'psalms'):
+        variants.add('psalm')
+        variants.add('psalms')
+    return list(variants)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/books')
+def get_books():
+    """Returns the ordered list of Bible books and their chapter counts."""
+    books_info = [
+        {"name": book, "chapters": list(BIBLE_DATA[book].keys())}
+        for book in BOOK_ORDER
+    ]
+    return jsonify(books_info)
+
+@app.route('/api/bible/<book>/<int:chapter>')
+def get_chapter(book, chapter):
+    """Returns all verses for a specific book and chapter."""
+    verses = BIBLE_DATA.get(book, {}).get(chapter, {})
+    return jsonify(verses)
+
+@app.route('/api/commentaries/<book>')
+def get_commentaries_for_book(book):
+    """
+    Lazy-loads ONLY the JSON files from commentaries_json/ that match the active book.
+    Matches <author>_<book>.json and <author>_<book>_<#>.json
+    """
+    if not os.path.exists(COMMENTARIES_DIR):
+        return jsonify([])
+
+    book_variants = normalize_book_name(book)
+    # Build regex: ^([a-zA-Z0-9-]+)_(genesis)(?:_(\d+))?\.json$
+    variants_regex = '|'.join(re.escape(v) for v in book_variants)
+    file_pattern = re.compile(rf'^([a-zA-Z0-9_]+?)_({variants_regex})(?:_(\d+))?\.json$', re.IGNORECASE)
+
+    matched_commentaries = []
+
+    for filename in os.listdir(COMMENTARIES_DIR):
+        match = file_pattern.match(filename)
+        if match:
+            author_raw, _, suffix = match.groups()
+            author_name = author_raw.replace('_', ' ').title()
+            display_title = f"{author_name} ({suffix})" if suffix else author_name
+
+            filepath = os.path.join(COMMENTARIES_DIR, filename)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                matched_commentaries.append({
+                    "id": filename,
+                    "author": display_title,
+                    "filename": filename,
+                    "data": data
+                })
+            except Exception as e:
+                print(f"Error loading {filename}: {e}")
+
+    # Sort alphabetically by author title
+    matched_commentaries.sort(key=lambda x: x["author"])
+    return jsonify(matched_commentaries)
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)

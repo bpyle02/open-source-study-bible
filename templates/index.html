@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bible &amp; Commentary Reader</title>
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+  <style>
+    :root {
+      --bg: #f8f9fa;
+      --panel: #fff;
+      --border: #dee2e6;
+      --primary: #2b579a;
+      --text: #212529;
+      --muted: #6c757d;
+      --red: #c00000;
+    }
+    body.dark-mode {
+      --bg: #121212;
+      --panel: #1e1e1e;
+      --border: #383838;
+      --primary: #77a9ed;
+      --text: #e0e0e0;
+      --muted: #aaa;
+      --red: #ff7777;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      color: var(--text);
+      background: var(--bg);
+      font: 15px system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    select, button {
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      background: var(--panel);
+      font: inherit;
+    }
+    button, select { cursor: pointer; }
+    button:disabled { cursor: default; opacity: .5; }
+    button:hover:not(:disabled), select:hover { border-color: var(--primary); }
+    #filterBadge {
+      padding: 5px 10px;
+      border-radius: 14px;
+      color: var(--muted);
+      background: var(--bg);
+      font-size: 13px;
+    }
+    main { display: flex; flex: 1; min-height: 0; }
+    .pane { flex: 1; min-width: 0; overflow: auto; padding: 22px; }
+    #bibleContainer {
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      font-size: 17px;
+      line-height: 1.75;
+    }
+    #commentariesContainer { background: var(--bg); }
+    h1.chapter-heading {
+      margin: 0 0 15px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid var(--primary);
+      color: var(--primary);
+      font-size: 28px;
+    }
+    .chapter-title {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 20px;
+      font-style: italic;
+      font-weight: 500;
+    }
+    .section-heading { margin: 22px 0 9px; color: var(--primary); font-size: 18px; }
+    .paragraph-block { margin: 0 0 1em; }
+    .verse { padding: 2px 3px; border-radius: 3px; cursor: pointer; white-space: pre-line; }
+    .verse:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
+    .verse.has-footnote { text-decoration: underline dotted color-mix(in srgb, var(--primary) 60%, transparent); text-underline-offset: 3px; }
+    .verse.selected { box-shadow: inset 0 0 0 1px var(--primary); }
+    .verse.markup-highlight {
+      background-color: color-mix(in srgb, var(--verse-highlight-color) 45%, transparent);
+    }
+    .verse.markup-underline {
+      text-decoration: underline solid var(--verse-underline-color) 3px;
+      text-underline-offset: 3px;
+    }
+    .verse.markup-bracket::before,
+    .verse.markup-bracket::after { color: var(--verse-bracket-color); font-weight: 700; }
+    .verse.markup-bracket::before { content: "["; margin-right: 2px; }
+    .verse.markup-bracket::after { content: "]"; margin-left: 2px; }
+    .verse-num {
+      margin-right: 4px;
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+      vertical-align: super;
+    }
+    .verse-by-verse .verse { display: block; margin-bottom: 6px; }
+    .hide-red .red-letter { color: inherit; }
+    .red-letter { color: var(--red); }
+    .fn-marker { color: var(--primary); font-size: .72em; font-weight: 700; vertical-align: super; text-decoration: none; }
+    .comm-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 15px;
+    }
+    .source-section { margin-bottom: 24px; }
+    .source-section > .comm-header { cursor: pointer; list-style: none; }
+    .source-section > .comm-header::-webkit-details-marker { display: none; }
+    .source-section > .comm-header::before {
+      content: "▾";
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .source-section:not([open]) > .comm-header::before { content: "▸"; }
+    .comm-header h2 { margin: 0; font-size: 20px; }
+    .markup-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 8px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .markup-toolbar[hidden] { display: none; }
+    .markup-toolbar button { padding: 5px 8px; }
+    .markup-color {
+      width: 25px;
+      height: 25px;
+      padding: 0 !important;
+      border: 2px solid var(--border);
+      border-radius: 50%;
+    }
+    .markup-color[aria-pressed="true"] { outline: 2px solid var(--primary); }
+    #markupColorPicker { width: 32px; height: 30px; padding: 2px; }
+    #markupStatus { color: var(--muted); font-size: 13px; }
+    #loadedFilesCount { color: var(--muted); }
+    .comm-card {
+      margin-bottom: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel);
+    }
+    .comm-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 15px;
+      background: var(--bg);
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .comm-card-body { padding: 15px; line-height: 1.6; }
+    .comm-metadata { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+    .comm-card.minimized .comm-card-body { display: none; }
+    .comm-entry {
+      margin: 0 0 12px;
+      padding: 0 0 12px;
+      border-bottom: 1px dashed var(--border);
+      overflow-wrap: anywhere;
+    }
+    .comm-entry:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
+    .comm-markdown { white-space: normal; }
+    .comm-markdown > :first-child { margin-top: 0; }
+    .comm-markdown > :last-child { margin-bottom: 0; }
+    .comm-markdown p, .comm-markdown ul, .comm-markdown ol,
+    .comm-markdown blockquote, .comm-markdown pre { margin: 0 0 10px; }
+    .comm-markdown ul, .comm-markdown ol { padding-left: 24px; }
+    .comm-markdown li { margin-bottom: 4px; }
+    .comm-markdown blockquote {
+      padding-left: 12px;
+      border-left: 3px solid var(--primary);
+      color: var(--muted);
+    }
+    .comm-markdown pre {
+      overflow-x: auto;
+      padding: 10px;
+      border-radius: 4px;
+      background: var(--bg);
+    }
+    .comm-markdown code {
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: var(--bg);
+    }
+    .comm-markdown pre code { padding: 0; background: transparent; }
+    .comm-markdown table { border-collapse: collapse; margin-bottom: 10px; }
+    .comm-markdown th, .comm-markdown td {
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+    }
+    .comm-verse-label {
+      display: inline-block;
+      margin-bottom: 7px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: var(--primary);
+      background: color-mix(in srgb, var(--primary) 12%, transparent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .empty-msg { color: var(--muted); font-style: italic; }
+    .error-msg { padding: 12px; border: 1px solid #c0392b; border-radius: 5px; color: #c0392b; }
+    .settings { position: relative; }
+    #settingsDropdown {
+      display: none;
+      position: absolute;
+      z-index: 2;
+      top: calc(100% + 5px);
+      right: 0;
+      min-width: 175px;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--panel);
+      box-shadow: 0 4px 12px #0002;
+    }
+    #settingsDropdown.open { display: grid; gap: 8px; }
+    #settingsDropdown label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    #accentColorPicker { width: 26px; height: 24px; padding: 0; border: 0; background: transparent; }
+    #footnotePopup {
+      display: none;
+      position: fixed;
+      z-index: 3;
+      bottom: 0;
+      left: 0;
+      width: 50vw;
+      max-height: 35vh;
+      overflow: auto;
+      padding: 12px 18px;
+      border-top: 2px solid var(--primary);
+      border-right: 1px solid var(--border);
+      border-top-right-radius: 6px;
+      background: var(--panel);
+      box-shadow: 0 -4px 18px #0003;
+    }
+    #footnotePopup.visible { display: block; }
+    .footnote-popup-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    #footnoteClose { padding: 0 6px; border: 0; font-size: 20px; }
+    #fnLabel { color: var(--primary); font-weight: 700; }
+    .footnote-section-title {
+      margin: 12px 0 6px;
+      color: var(--primary);
+      font-weight: 700;
+    }
+    .footnote-entry { margin: 0 0 8px; }
+    .cross-reference-list { margin: 0; padding-left: 20px; }
+    .cross-reference-link {
+      padding: 0;
+      border: 0;
+      color: var(--primary);
+      background: transparent;
+      text-align: left;
+      text-decoration: underline;
+    }
+    .cross-reference-link:hover { border-color: transparent; }
+    .cross-reference-attribution { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+    @media (max-width: 760px) {
+      body { height: auto; min-height: 100vh; overflow: auto; }
+      main { flex-direction: column; overflow: visible; }
+      .pane { min-height: 48vh; }
+      #bibleContainer { border-right: 0; border-bottom: 1px solid var(--border); }
+      header { align-items: flex-start; }
+      #footnotePopup { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="controls">
+      <strong>Passage:</strong>
+      <select id="translationSelect" aria-label="Bible translation"></select>
+      <select id="bookSelect" aria-label="Bible book"></select>
+      <select id="chapterSelect" aria-label="Chapter"></select>
+      <button id="prevChapterBtn" type="button">← Prev</button>
+      <button id="nextChapterBtn" type="button">Next →</button>
+      <span id="filterBadge">Loading…</span>
+      <button id="clearVerseBtn" type="button" hidden>Clear Selection</button>
+    </div>
+    <div class="controls">
+      <button id="expandAllBtn" type="button">Expand All</button>
+      <button id="minimizeAllBtn" type="button">Minimize All</button>
+      <div class="settings">
+        <button id="settingsBtn" type="button">⚙ Settings</button>
+        <div id="settingsDropdown">
+          <label><input type="checkbox" id="darkModeToggle"> Dark Mode</label>
+          <label><input type="color" id="accentColorPicker" value="#2b579a"> Accent Color</label>
+          <label><input type="checkbox" id="verseByVerseToggle"> Verse-by-Verse</label>
+          <label><input type="checkbox" id="redLetterToggle" checked> Red Letter</label>
+        </div>
+      </div>
+    </div>
+  </header>
+  <div class="markup-toolbar" id="markupToolbar" role="toolbar"
+    aria-label="Selected verse markup" hidden>
+    <strong>Markup selected:</strong>
+    <button type="button" data-markup="highlight">Highlight</button>
+    <button type="button" data-markup="underline">Underline</button>
+    <button type="button" data-markup="bracket">Brackets</button>
+    <button type="button" id="clearMarkupBtn">Remove markup</button>
+    <span class="markup-color-options" aria-label="Preset markup colors">
+      <button type="button" class="markup-color" data-color="#fff2a8"
+        aria-label="Yellow" aria-pressed="true" title="Yellow"
+        style="background-color: #fff2a8"></button>
+      <button type="button" class="markup-color" data-color="#b9e6b3"
+        aria-label="Green" aria-pressed="false" title="Green"
+        style="background-color: #b9e6b3"></button>
+      <button type="button" class="markup-color" data-color="#b9d9f5"
+        aria-label="Blue" aria-pressed="false" title="Blue"
+        style="background-color: #b9d9f5"></button>
+      <button type="button" class="markup-color" data-color="#f5c2df"
+        aria-label="Pink" aria-pressed="false" title="Pink"
+        style="background-color: #f5c2df"></button>
+    </span>
+    <label for="markupColorPicker">Custom color</label>
+    <input type="color" id="markupColorPicker" value="#fff2a8"
+      aria-label="Choose a custom markup color">
+    <span id="markupStatus" role="status" aria-live="polite"></span>
+  </div>
+  <main>
+    <section class="pane" id="bibleContainer" aria-label="Bible passage"></section>
+    <section class="pane" id="sourcesContainer" aria-label="Commentaries and sermons">
+      <details class="source-section" id="commentariesSection" open>
+        <summary class="comm-header">
+          <h2>Commentaries</h2>
+          <small id="loadedFilesCount"></small>
+        </summary>
+        <div id="commentaryCards"></div>
+      </details>
+      <details class="source-section" id="sermonsSection" open>
+        <summary class="comm-header">
+          <h2>Sermons</h2>
+          <small id="loadedSermonsCount"></small>
+        </summary>
+        <div id="sermonCards"></div>
+      </details>
+    </section>
+  </main>
+  <aside id="footnotePopup" aria-live="polite">
+    <div class="footnote-popup-header">
+      <div id="fnLabel">Footnotes &amp; Cross-references</div>
+      <button id="footnoteClose" type="button" aria-label="Close footnotes">×</button>
+    </div>
+    <div id="fnContent"></div>
+  </aside>
+
+  <script>
+    const bookSelect = document.getElementById('bookSelect');
+    const chapterSelect = document.getElementById('chapterSelect');
+    const translationSelect = document.getElementById('translationSelect');
+    const bibleContainer = document.getElementById('bibleContainer');
+    const commentaryCards = document.getElementById('commentaryCards');
+    const sermonCards = document.getElementById('sermonCards');
+    const filterBadge = document.getElementById('filterBadge');
+    const clearVerseBtn = document.getElementById('clearVerseBtn');
+    const footnotePopup = document.getElementById('footnotePopup');
+    let translations = [];
+    let currentTranslation = '';
+    let books = [];
+    let currentBook = '';
+    let currentBookId = '';
+    let currentChapter = 1;
+    const selectedVerses = new Set();
+    let chapterData = null;
+    let commentaries = [];
+    let sermons = [];
+    let verseMarkups = {};
+    let currentMarkupColor = '#fff2a8';
+    let minimized = {};
+    let requestId = 0;
+
+    async function fetchJson(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || `Request failed (${response.status})`);
+      }
+      return response.json();
+    }
+
+    function showError(error) {
+      bibleContainer.replaceChildren();
+      commentaryCards.replaceChildren();
+      sermonCards.replaceChildren();
+      const message = document.createElement('p');
+      message.className = 'error-msg';
+      message.textContent = `Unable to load this passage: ${error.message}`;
+      bibleContainer.appendChild(message);
+    }
+
+    async function init() {
+      applySettings();
+      try {
+        translations = await fetchJson('/api/translations');
+        for (const translation of translations) {
+          const option = document.createElement('option');
+          option.value = translation.id;
+          option.textContent = `${translation.name} (${translation.id})`;
+          translationSelect.appendChild(option);
+        }
+        if (!translations.length) {
+          throw new Error('No Bible translation files were found in the bibles folder.');
+        }
+        const savedTranslation = localStorage.getItem('translation');
+        const initialTranslation = translations.find(item => item.id === savedTranslation)
+          || translations[0];
+        await selectTranslation(initialTranslation.id);
+      } catch (error) {
+        showError(error);
+      }
+    }
+
+    async function selectTranslation(translationId) {
+      const id = ++requestId;
+      const previousBook = currentBook;
+      const previousChapter = currentChapter;
+      const translation = translations.find(item => item.id === translationId);
+      if (!translation) return;
+      currentTranslation = translation.id;
+      translationSelect.value = translation.id;
+      localStorage.setItem('translation', translation.id);
+      try {
+        const translationBooks = await fetchJson(
+          `/api/books/${encodeURIComponent(translation.id)}`
+        );
+        if (id !== requestId) return;
+        books = translationBooks;
+        bookSelect.replaceChildren();
+        for (const book of books) {
+          const option = document.createElement('option');
+          option.value = book.id;
+          option.textContent = book.name;
+          bookSelect.appendChild(option);
+        }
+        if (!books.length) throw new Error(`No books found for ${translation.name}.`);
+        const selectedBook = books.find(item => item.name === previousBook) || books[0];
+        const preferredChapter = selectedBook.chapters.includes(previousChapter)
+          ? previousChapter : selectedBook.chapters[0];
+        await selectBook(selectedBook.id, preferredChapter);
+      } catch (error) {
+        if (id === requestId) showError(error);
+      }
+    }
+
+    async function selectBook(bookId, preferredChapter = null) {
+      const book = books.find(item => item.id === bookId);
+      if (!book) return;
+      currentBook = book.name;
+      currentBookId = book.id;
+      bookSelect.value = book.id;
+      chapterSelect.replaceChildren();
+      for (const chapter of book.chapters) {
+        const option = document.createElement('option');
+        option.value = chapter;
+        option.textContent = `Chapter ${chapter}`;
+        chapterSelect.appendChild(option);
+      }
+      const chapter = book.chapters.includes(Number(preferredChapter))
+        ? Number(preferredChapter) : book.chapters[0];
+      await selectChapter(chapter);
+    }
+
+    async function selectChapter(chapter) {
+      const id = ++requestId;
+      currentChapter = Number(chapter);
+      selectedVerses.clear();
+      verseMarkups = {};
+      chapterSelect.value = currentChapter;
+      footnotePopup.classList.remove('visible');
+      try {
+        const pathBook = encodeURIComponent(currentBook);
+        const pathBookId = encodeURIComponent(currentBookId);
+        const [bible, commentary, sermon, markups] = await Promise.all([
+          fetchJson(`/api/bible/${encodeURIComponent(currentTranslation)}/${pathBookId}/${currentChapter}`),
+          fetchJson(`/api/commentaries/${pathBook}/${currentChapter}`),
+          fetchJson(`/api/sermons/${pathBook}/${currentChapter}`),
+          fetchJson(`/api/markup/${encodeURIComponent(currentTranslation)}/${pathBookId}/${currentChapter}`)
+        ]);
+        if (id !== requestId) return;
+        chapterData = bible;
+        commentaries = commentary;
+        sermons = sermon;
+        verseMarkups = markups;
+        renderChapter();
+        renderCommentaries();
+        renderSermons();
+        updateControls();
+        document.getElementById('loadedFilesCount').textContent =
+          `${commentaries.length} source${commentaries.length === 1 ? '' : 's'}`;
+        document.getElementById('loadedSermonsCount').textContent =
+          `${sermons.length} sermon${sermons.length === 1 ? '' : 's'}`;
+      } catch (error) {
+        if (id === requestId) showError(error);
+      }
+    }
+
+    function renderChapter() {
+      bibleContainer.replaceChildren();
+      if (!chapterData || !Array.isArray(chapterData.blocks)) {
+        const empty = document.createElement('p');
+        empty.className = 'empty-msg';
+        empty.textContent = 'No Bible text is available for this chapter.';
+        bibleContainer.appendChild(empty);
+        return;
+      }
+      if (chapterData.chapter_heading) {
+        const heading = document.createElement('h1');
+        heading.className = 'chapter-heading';
+        heading.textContent = chapterData.chapter_heading;
+        bibleContainer.appendChild(heading);
+      }
+      for (const block of chapterData.blocks) {
+        if (block.type === 'chapter_title' || block.type === 'heading') {
+          const heading = document.createElement(block.type === 'heading' ? 'h3' : 'h2');
+          heading.className = block.type === 'heading' ? 'section-heading' : 'chapter-title';
+          heading.textContent = block.text;
+          bibleContainer.appendChild(heading);
+        } else if (block.type === 'paragraph' && Array.isArray(block.verses)) {
+          const paragraph = document.createElement('p');
+          paragraph.className = 'paragraph-block';
+          for (const verse of block.verses) paragraph.appendChild(renderVerse(verse));
+          bibleContainer.appendChild(paragraph);
+        }
+      }
+      bibleContainer.classList.toggle(
+        'verse-by-verse', document.getElementById('verseByVerseToggle').checked
+      );
+      bibleContainer.classList.toggle(
+        'hide-red', !document.getElementById('redLetterToggle').checked
+      );
+      highlightSelectedVerse();
+    }
+
+    function renderVerse(verse) {
+      const span = document.createElement('span');
+      span.className = 'verse';
+      span.dataset.verse = verse.num;
+      applyVerseMarkup(span, verse.num);
+      const number = document.createElement('span');
+      number.className = 'verse-num';
+      number.textContent = verse.num;
+      span.appendChild(number);
+      for (const segment of verse.segments || []) {
+        const text = document.createElement('span');
+        if (segment.red) text.classList.add('red-letter');
+        if (segment.fn) text.classList.add('fn-marker');
+        if (segment.bold) text.style.fontWeight = 'bold';
+        text.textContent = segment.text;
+        span.appendChild(text);
+      }
+      span.addEventListener('click', () => selectVerse(verse));
+      return span;
+    }
+
+    function selectVerse(verse) {
+      if (selectedVerses.has(verse.num)) {
+        selectedVerses.delete(verse.num);
+      } else {
+        selectedVerses.add(verse.num);
+      }
+      if (selectedVerses.size === 1) {
+        const selectedVerseNum = selectedVerses.values().next().value;
+        const selectedVerse = chapterData.blocks
+          .flatMap(block => block.verses || [])
+          .find(item => item.num === selectedVerseNum);
+        if (selectedVerse) showVerseNotes(selectedVerse);
+      } else {
+        footnotePopup.classList.remove('visible');
+        document.getElementById('fnContent').replaceChildren();
+      }
+      highlightSelectedVerse();
+      renderCommentaries();
+      renderSermons();
+      updateControls();
+    }
+
+    function showVerseNotes(verse) {
+      const footnotes = verse.footnotes || [];
+      const crossReferences = verse.cross_references || [];
+      if (footnotes.length || crossReferences.length) {
+        document.getElementById('fnLabel').textContent =
+          `Notes & Cross-references — ${currentBook} ${currentChapter}:${verse.num}`;
+        const content = document.getElementById('fnContent');
+        content.replaceChildren();
+        if (footnotes.length) {
+          const heading = document.createElement('div');
+          heading.className = 'footnote-section-title';
+          heading.textContent = 'Footnotes';
+          content.appendChild(heading);
+        }
+        for (const note of footnotes) {
+          const entry = document.createElement('p');
+          entry.className = 'footnote-entry';
+          entry.textContent = note;
+          content.appendChild(entry);
+        }
+        if (crossReferences.length) {
+          const heading = document.createElement('div');
+          heading.className = 'footnote-section-title';
+          heading.textContent = 'Cross-references';
+          content.appendChild(heading);
+          const list = document.createElement('ul');
+          list.className = 'cross-reference-list';
+          for (const reference of crossReferences) {
+            const item = document.createElement('li');
+            const link = document.createElement('button');
+            link.type = 'button';
+            link.className = 'cross-reference-link';
+            link.textContent = reference.reference;
+            link.addEventListener('click', () => openCrossReference(reference));
+            item.appendChild(link);
+            list.appendChild(item);
+          }
+          content.appendChild(list);
+          const attribution = document.createElement('p');
+          attribution.className = 'cross-reference-attribution';
+          attribution.textContent = 'Cross-references from OpenBible.info (CC-BY).';
+          content.appendChild(attribution);
+        }
+        footnotePopup.classList.add('visible');
+      } else {
+        footnotePopup.classList.remove('visible');
+      }
+    }
+
+    async function openCrossReference(reference) {
+      const targetBook = books.find(book => book.id === reference.book_id);
+      if (!targetBook) {
+        showError(new Error(`Book not found for cross-reference: ${reference.reference}`));
+        return;
+      }
+      await selectBook(targetBook.id, reference.chapter);
+      const targetVerse = chapterData?.blocks
+        ?.flatMap(block => block.verses || [])
+        .find(verse => verse.num === reference.verse);
+      if (targetVerse) selectVerse(targetVerse);
+    }
+
+    function highlightSelectedVerse() {
+      for (const element of bibleContainer.querySelectorAll('.verse')) {
+        element.classList.toggle(
+          'selected', selectedVerses.has(Number(element.dataset.verse))
+        );
+      }
+    }
+
+    function applyVerseMarkup(element, verse) {
+      const markup = verseMarkups[String(verse)] || {};
+      for (const type of ['highlight', 'underline', 'bracket']) {
+        if (typeof markup[type] === 'string') {
+          element.classList.add(`markup-${type}`);
+          element.style.setProperty(`--verse-${type}-color`, markup[type]);
+        }
+      }
+    }
+
+    async function saveSelectedMarkup(markupForVerse) {
+      if (!selectedVerses.size) {
+        document.getElementById('markupStatus').textContent =
+          'Select one or more verses first.';
+        return;
+      }
+
+      const updates = [...selectedVerses].map(verse => ({
+        verse,
+        markup: markupForVerse(verseMarkups[String(verse)] || {}),
+      }));
+      const status = document.getElementById('markupStatus');
+      status.textContent = 'Saving…';
+      try {
+        const response = await fetch(
+          `/api/markup/${encodeURIComponent(currentTranslation)}/`
+            + `${encodeURIComponent(currentBookId)}/${currentChapter}`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ verses: updates }),
+          }
+        );
+        if (!response.ok) {
+          const message = await response.text();
+          throw new Error(message || `Save failed (${response.status})`);
+        }
+        for (const update of updates) {
+          if (Object.keys(update.markup).length) {
+            verseMarkups[String(update.verse)] = update.markup;
+          } else {
+            delete verseMarkups[String(update.verse)];
+          }
+        }
+        renderChapter();
+        status.textContent = `Saved markup for ${updates.length} verse`
+          + `${updates.length === 1 ? '' : 's'}.`;
+      } catch (error) {
+        status.textContent = `Unable to save verse markup: ${error.message}`;
+        console.error('Unable to save verse markup.', error);
+      }
+    }
+
+    function updateMarkupColor(color) {
+      currentMarkupColor = color;
+      for (const button of document.querySelectorAll('.markup-color')) {
+        button.setAttribute(
+          'aria-pressed', String(button.dataset.color === currentMarkupColor)
+        );
+      }
+    }
+
+    function renderCommentaries() {
+      commentaryCards.replaceChildren();
+      if (!commentaries.length) {
+        const empty = document.createElement('p');
+        empty.className = 'empty-msg';
+        empty.textContent = 'No commentary sources were found.';
+        commentaryCards.appendChild(empty);
+        return;
+      }
+      for (const commentary of commentaries) {
+        const card = document.createElement('article');
+        card.className = `comm-card${minimized[commentary.id] ? ' minimized' : ''}`;
+        const header = document.createElement('div');
+        header.className = 'comm-card-header';
+        header.setAttribute('role', 'button');
+        header.tabIndex = 0;
+        const title = document.createElement('span');
+        const entries = (commentary.entries || []).filter(entry =>
+          !selectedVerses.size || selectedVerses.has(entry.verse)
+        );
+        title.textContent = `${commentary.title} (${entries.length} note${entries.length === 1 ? '' : 's'})`;
+        const toggle = document.createElement('span');
+        toggle.textContent = minimized[commentary.id] ? '[+]' : '[–]';
+        header.append(title, toggle);
+        const toggleCard = () => {
+          minimized[commentary.id] = !card.classList.toggle('minimized');
+          toggle.textContent = minimized[commentary.id] ? '[+]' : '[–]';
+        };
+        header.addEventListener('click', toggleCard);
+        header.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            toggleCard();
+          }
+        });
+        const body = document.createElement('div');
+        body.className = 'comm-card-body';
+        const metadata = document.createElement('p');
+        metadata.className = 'comm-metadata';
+        metadata.textContent = `${commentary.author} · Written: ${commentary.date_written}`;
+        body.appendChild(metadata);
+        if (!entries.length) {
+          const empty = document.createElement('p');
+          empty.className = 'empty-msg';
+          empty.textContent = 'No commentary for this selection.';
+          body.appendChild(empty);
+        } else {
+          for (const entry of entries) {
+            const note = document.createElement('div');
+            note.className = 'comm-entry';
+            const label = document.createElement('div');
+            label.className = 'comm-verse-label';
+            label.textContent = entry.verse === null
+              ? 'Chapter note' : `Verse ${entry.verse}`;
+            const text = renderMarkdown(entry.text, entry.format);
+            note.append(label, text);
+            body.appendChild(note);
+          }
+        }
+        card.append(header, body);
+        commentaryCards.appendChild(card);
+      }
+    }
+
+    function renderSermons() {
+      sermonCards.replaceChildren();
+      const visibleSermons = sermons.filter(sermon =>
+        !selectedVerses.size
+        || sermon.verses.some(verse => selectedVerses.has(verse))
+      );
+      if (!visibleSermons.length) {
+        const empty = document.createElement('p');
+        empty.className = 'empty-msg';
+        empty.textContent = 'No sermons were found for this selection.';
+        sermonCards.appendChild(empty);
+        return;
+      }
+      for (const sermon of visibleSermons) {
+        const card = document.createElement('article');
+        card.className = `comm-card${minimized[sermon.id] ? ' minimized' : ''}`;
+        const header = document.createElement('div');
+        header.className = 'comm-card-header';
+        header.setAttribute('role', 'button');
+        header.tabIndex = 0;
+        const title = document.createElement('span');
+        title.textContent = sermon.title;
+        const toggle = document.createElement('span');
+        toggle.textContent = minimized[sermon.id] ? '[+]' : '[–]';
+        header.append(title, toggle);
+        const toggleCard = () => {
+          minimized[sermon.id] = !card.classList.toggle('minimized');
+          toggle.textContent = minimized[sermon.id] ? '[+]' : '[–]';
+        };
+        header.addEventListener('click', toggleCard);
+        header.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            toggleCard();
+          }
+        });
+        const body = document.createElement('div');
+        body.className = 'comm-card-body';
+        const metadata = document.createElement('p');
+        metadata.className = 'comm-metadata';
+        metadata.textContent = `${sermon.author} · ${sermon.date_written}`;
+        const references = document.createElement('div');
+        references.className = 'comm-verse-label';
+        references.textContent =
+          `${currentBook} ${currentChapter}:${sermon.verses.join(', ')}`;
+        body.append(metadata, references, renderMarkdown(sermon.text, 'markdown'));
+        card.append(header, body);
+        sermonCards.appendChild(card);
+      }
+    }
+
+    function renderMarkdown(value, format) {
+      const text = document.createElement('div');
+      text.className = 'comm-markdown';
+      if (format === 'markdown' && window.marked && window.DOMPurify) {
+        text.innerHTML = DOMPurify.sanitize(marked.parse(value, {
+          breaks: true,
+          gfm: true
+        }));
+      } else {
+        text.textContent = value;
+        if (format === 'markdown') {
+          console.error('Markdown renderer or sanitizer did not load.');
+        }
+      }
+      return text;
+    }
+
+    function updateControls() {
+      const selected = [...selectedVerses].sort((a, b) => a - b);
+      filterBadge.textContent = !selected.length
+        ? `${currentTranslation} · ${currentBook} ${currentChapter} (all verses)`
+        : `${currentTranslation} · ${currentBook} ${currentChapter} `
+          + `${selected.length} verse${selected.length === 1 ? '' : 's'} selected`;
+      clearVerseBtn.hidden = !selected.length;
+      document.getElementById('markupToolbar').hidden = !selected.length;
+      const book = books.find(item => item.id === currentBookId);
+      const index = book ? book.chapters.indexOf(currentChapter) : -1;
+      document.getElementById('prevChapterBtn').disabled = index <= 0;
+      document.getElementById('nextChapterBtn').disabled =
+        !book || index < 0 || index === book.chapters.length - 1;
+    }
+
+    function applySettings() {
+      const dark = localStorage.getItem('darkMode') === 'true';
+      document.getElementById('darkModeToggle').checked = dark;
+      document.body.classList.toggle('dark-mode', dark);
+      const verseByVerse = localStorage.getItem('verseByVerse') === 'true';
+      document.getElementById('verseByVerseToggle').checked = verseByVerse;
+      const redLetter = localStorage.getItem('redLetter') !== 'false';
+      document.getElementById('redLetterToggle').checked = redLetter;
+      const accent = localStorage.getItem('accentColor') || '#2b579a';
+      document.getElementById('accentColorPicker').value = accent;
+      document.documentElement.style.setProperty('--primary', accent);
+    }
+
+    document.getElementById('settingsBtn').addEventListener('click', event => {
+      event.stopPropagation();
+      document.getElementById('settingsDropdown').classList.toggle('open');
+    });
+    document.addEventListener('click', event => {
+      if (!event.target.closest('.settings')) {
+        document.getElementById('settingsDropdown').classList.remove('open');
+      }
+    });
+    document.getElementById('darkModeToggle').addEventListener('change', event => {
+      document.body.classList.toggle('dark-mode', event.target.checked);
+      localStorage.setItem('darkMode', event.target.checked);
+    });
+    document.getElementById('verseByVerseToggle').addEventListener('change', event => {
+      bibleContainer.classList.toggle('verse-by-verse', event.target.checked);
+      localStorage.setItem('verseByVerse', event.target.checked);
+    });
+    document.getElementById('redLetterToggle').addEventListener('change', event => {
+      bibleContainer.classList.toggle('hide-red', !event.target.checked);
+      localStorage.setItem('redLetter', event.target.checked);
+    });
+    document.getElementById('accentColorPicker').addEventListener('input', event => {
+      document.documentElement.style.setProperty('--primary', event.target.value);
+      localStorage.setItem('accentColor', event.target.value);
+    });
+    translationSelect.addEventListener(
+      'change', event => selectTranslation(event.target.value)
+    );
+    bookSelect.addEventListener('change', event => selectBook(event.target.value));
+    chapterSelect.addEventListener('change', event => selectChapter(event.target.value));
+    clearVerseBtn.addEventListener('click', () => {
+      selectedVerses.clear();
+      footnotePopup.classList.remove('visible');
+      document.getElementById('fnContent').replaceChildren();
+      highlightSelectedVerse();
+      renderCommentaries();
+      renderSermons();
+      updateControls();
+    });
+    for (const button of document.querySelectorAll('[data-markup]')) {
+      button.addEventListener('click', () => {
+        const markupType = button.dataset.markup;
+        saveSelectedMarkup(markup => ({
+          ...markup,
+          [markupType]: currentMarkupColor,
+        }));
+      });
+    }
+    for (const button of document.querySelectorAll('.markup-color')) {
+      button.addEventListener('click', () => {
+        updateMarkupColor(button.dataset.color);
+        document.getElementById('markupColorPicker').value = currentMarkupColor;
+      });
+    }
+    document.getElementById('markupColorPicker').addEventListener(
+      'input', event => updateMarkupColor(event.target.value)
+    );
+    document.getElementById('clearMarkupBtn').addEventListener(
+      'click', () => saveSelectedMarkup(() => ({}))
+    );
+    document.getElementById('footnoteClose').addEventListener('click', () => {
+      footnotePopup.classList.remove('visible');
+    });
+    document.getElementById('prevChapterBtn').addEventListener('click', () => {
+      const book = books.find(item => item.id === currentBookId);
+      if (book) {
+        const index = book.chapters.indexOf(currentChapter);
+        if (index > 0) selectChapter(book.chapters[index - 1]);
+      }
+    });
+    document.getElementById('nextChapterBtn').addEventListener('click', () => {
+      const book = books.find(item => item.id === currentBookId);
+      if (book) {
+        const index = book.chapters.indexOf(currentChapter);
+        if (index >= 0 && index < book.chapters.length - 1) {
+          selectChapter(book.chapters[index + 1]);
+        }
+      }
+    });
+    document.getElementById('expandAllBtn').addEventListener('click', () => {
+      minimized = {};
+      renderCommentaries();
+      renderSermons();
+    });
+    document.getElementById('minimizeAllBtn').addEventListener('click', () => {
+      for (const commentary of commentaries) minimized[commentary.id] = true;
+      for (const sermon of sermons) minimized[sermon.id] = true;
+      renderCommentaries();
+      renderSermons();
+    });
+    window.addEventListener('DOMContentLoaded', init, { once: true });
+  </script>
+</body>
+</html>
