@@ -29,8 +29,8 @@ browser UI for reading and exploring passages.
 | `bibles/` | Gzip-compressed Bible translation JSON files, such as `bsb_translation.json.gz` and `engwebp_translation.json.gz`. See [bibles/README.md](bibles/README.md) for the data format. |
 | `commentaries/` | Gzip-compressed commentary sources. See [commentaries/README.md](commentaries/README.md) for the data format. |
 | `sermons/` | Gzip-compressed sermon archives; currently includes Spurgeon's sermons. See [sermons/README.md](sermons/README.md). |
-| `cross-references/` | OpenBible cross-reference source data, currently stored as a tab-separated text file. |
-| `footnotes/` | Per-translation footnote data. To be implemented soon. |
+| `cross-references/` | Compressed JSON cross-reference sources, including OpenBible and the Treasury of Scripture Knowledge (TSK). See [cross-references/README.md](cross-references/README.md) for the source format. |
+| `footnotes/` | Per-translation footnote data. See [footnotes/README.md](footnotes/README.md) for the source format. |
 | `interlinear/` | Interlinear source data. To be implemented soon. |
 | `markup/` | User verse markup in `verse-markup.json.gz`. See [markup/README.md](markup/README.md). |
 | `book-introductions/` | Reserved for book introduction data. To be implemented soon. |
@@ -64,7 +64,9 @@ features require an internet connection in the browser.
 
 1. At startup, `app.py` discovers translation archives matching
    `bibles/*_translation.json.gz`, commentary archives matching
-   `commentaries/*.json.gz`, and sermon archives matching `sermons/*.json.gz`.
+   `commentaries/*.json.gz`, sermon archives matching `sermons/*.json.gz`,
+   footnotes in `footnotes/*.json.gz`, and cross-reference sources in
+   `cross-references/*.json.gz`.
 2. The app builds or refreshes `cache/reader.sqlite3` when those source files
    change. The cache is generated data and should not be committed.
 3. The browser requests the translations, books, and selected Bible chapter
@@ -100,10 +102,11 @@ content.
 
 ## TODO
 
-1. Split out footnotes to its own separate folder so per-version footnotes can be added.
-2. Convert cross-references to `.json.gz` files and move TSK to the cross-references folder.
+1. [x] Split out the BSB footnotes to its own separate folder so per-version footnotes can be added.
+2. [x] Convert cross-references to `.json.gz` files and move TSK to the cross-references folder. Add a setting to toggle one or both of the cross references sources off. Make sure the program accepts other cross reference sources with the proper formatting and filetype if they want to add their own custom ones.
 3. Update look and feel of footnotes/cross references popup.
 4. Add the ability for users to create their own sermons in Markdown format that get saved to their own `.json.gz` file.
 5. Add the ability for the users to create their own commentary in Markdown that gets saved to their own `.json.gz` file.
-6. Add the ability for users to write quick notes in plaintext.
-7. Implement interlinear data so when the user clicks on the interlinear button, words with Greek/Hebrew translations are underlined. When the user clicks on any of these words, the Greek/Hebrew word shows up with a definition and references.
+6. Add the ability for users to write quick notes in plaintext and add it as a section above the commentaries. Add a toggle to turn it on/off in settings.
+7. Add a section called "Topics" to the right side and allow users to add their own topics linked to specific verses or commentary entries.
+8. Implement interlinear data so when the user clicks on the interlinear button, words with Greek/Hebrew translations are underlined. When the user clicks on any of these words, the Greek/Hebrew word shows up with a definition and references.

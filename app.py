@@ -6,7 +6,6 @@ import sqlite3
 import tempfile
 import threading
 import zlib
-import csv
 from contextlib import closing
 from pathlib import Path
 
@@ -18,14 +17,13 @@ BASE_DIR = Path(__file__).resolve().parent
 BIBLES_DIR = BASE_DIR / "bibles"
 COMMENTARIES_DIR = BASE_DIR / "commentaries"
 SERMONS_DIR = BASE_DIR / "sermons"
+FOOTNOTES_DIR = BASE_DIR / "footnotes"
+CROSS_REFERENCES_DIR = BASE_DIR / "cross-references"
 MARKUP_DIR = BASE_DIR / "markup"
 MARKUP_FILE = MARKUP_DIR / "verse-markup.json.gz"
-CROSS_REFERENCES_FILE = (
-    BASE_DIR / "cross-references" / "open-bible_cross_references.txt"
-)
 DATABASE_DIR = BASE_DIR / "cache"
 DATABASE_FILE = DATABASE_DIR / "reader.sqlite3"
-DATABASE_SCHEMA_VERSION = "5"
+DATABASE_SCHEMA_VERSION = "11"
 TRANSLATION_NAMES = {
     "BSB": "Berean Standard Bible",
     "ENGWEBP": "World English Bible",
@@ -46,6 +44,8 @@ TRANSLATION_FILES = {
 }
 COMMENTARY_FILES = sorted(COMMENTARIES_DIR.glob("*.json.gz"))
 SERMON_FILES = sorted(SERMONS_DIR.glob("*.json.gz"))
+FOOTNOTE_FILES = sorted(FOOTNOTES_DIR.glob("*.json.gz"))
+CROSS_REFERENCE_FILES = sorted(CROSS_REFERENCES_DIR.glob("*.json.gz"))
 MARKUP_LOCK = threading.Lock()
 MARKUP_TYPES = {"highlight", "underline", "bracket"}
 MARKUP_COLOR_PATTERN = re.compile(r"#[0-9a-fA-F]{6}")
@@ -116,13 +116,58 @@ def format_cross_reference(start, end, book_names):
     return f"{start_label}–{end_label}"
 
 
-def make_bible_chapter(source, book_name, chapter_num):
+def normalize_cross_reference_source_id(source_name):
+    slug = re.sub(r"[^a-z0-9]+", "-", (source_name or "custom").casefold())
+    return slug.strip("-") or "custom"
+
+
+def load_footnote_sources():
+    sources = {}
+    for path in sorted(FOOTNOTES_DIR.glob("*.json.gz")):
+        with gzip.open(path, "rt", encoding="utf-8") as source_file:
+            data = json.load(source_file)
+        if not isinstance(data, dict):
+            continue
+        translation_id = data.get("translation_id") or data.get("translationId")
+        if not isinstance(translation_id, str) or not translation_id.strip():
+            translation_id = path.name.rsplit("_", 1)[0].upper()
+        translation_id = translation_id.upper()
+        notes = data.get("footnotes", [])
+        if not isinstance(notes, list):
+            notes = []
+        if not notes:
+            for chapter in data.get("chapters", []):
+                if not isinstance(chapter, dict):
+                    continue
+                book_id = chapter.get("book_id") or chapter.get("bookId")
+                chapter_num = chapter.get("chapter")
+                chapter_notes = chapter.get("footnotes") or chapter.get("notes") or []
+                if not isinstance(chapter_notes, list):
+                    continue
+                for note in chapter_notes:
+                    if isinstance(note, dict):
+                        note = dict(note)
+                        if isinstance(book_id, str) and book_id:
+                            note.setdefault("book_id", book_id)
+                        if isinstance(chapter_num, int):
+                            note.setdefault("chapter", chapter_num)
+                        notes.append(note)
+        if notes:
+            sources.setdefault(translation_id, []).extend(notes)
+    return sources
+
+
+def make_bible_chapter(source, book_name, chapter_num, extra_footnotes=None):
+    extra_footnotes = extra_footnotes or []
     footnotes_by_id = {}
     footnotes_by_verse = {}
-    for note in source.get("footnotes", []):
+    for note in [*source.get("footnotes", []), *extra_footnotes]:
         note_id = note.get("noteId")
         reference = note.get("reference", {})
         verse_num = reference.get("verse")
+        if (not isinstance(verse_num, int)
+                and isinstance(note.get("verse"), int)):
+            verse_num = note.get("verse")
         text = note.get("text")
         caller = note.get("caller", "")
         if isinstance(note_id, int):
@@ -245,7 +290,8 @@ def source_manifest():
         (*BIBLES_DIR.glob("*_translation.json.gz"),
          *COMMENTARIES_DIR.glob("*.json.gz"),
          *SERMONS_DIR.glob("*.json.gz"),
-         CROSS_REFERENCES_FILE),
+         *FOOTNOTES_DIR.glob("*.json.gz"),
+         *CROSS_REFERENCES_DIR.glob("*.json.gz")),
         key=lambda path: str(path.relative_to(BASE_DIR)).casefold(),
     )
     return json.dumps([
@@ -256,6 +302,115 @@ def source_manifest():
         }
         for path in files
     ], separators=(",", ":"))
+
+
+def read_cross_reference_data(path):
+    with gzip.open(path, "rt", encoding="utf-8") as source_file:
+        data = json.load(source_file)
+    if isinstance(data, list):
+        return {
+            "source": path.stem,
+            "label": path.stem.replace("_", " ").title(),
+            "references": data,
+            "notes": [],
+        }
+    if isinstance(data, dict):
+        source_name = data.get("source") or data.get("name") or path.stem
+        label = data.get("label") or data.get("title") or source_name
+        refs = data.get("references")
+        if refs is None:
+            refs = data.get("cross_references") or data.get("entries") or []
+        return {
+            "source": source_name,
+            "label": label,
+            "references": refs,
+            "notes": data.get("notes") or [],
+        }
+    raise ValueError(f"Invalid cross-reference source JSON: {path}")
+
+
+def iter_cross_reference_records(source_name, reference_data, book_names):
+    references = reference_data.get("references") or []
+    if not isinstance(references, list):
+        return []
+
+    records = []
+    for item in references:
+        if isinstance(item, dict):
+            source_reference = item.get("source") or item.get("source_reference")
+            target_reference = item.get("target") or item.get("target_reference")
+            votes = item.get("votes", item.get("weight", 1))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            source_reference, target_reference = item[:2]
+            votes = item[2] if len(item) >= 3 else 1
+        else:
+            continue
+        if not isinstance(source_reference, str) or not isinstance(target_reference, str):
+            continue
+        try:
+            source = parse_reference(source_reference)
+            target_parts = target_reference.split("-", maxsplit=1)
+            target = parse_reference(target_parts[0])
+            target_end = None
+            if len(target_parts) == 2:
+                target_end = parse_reference(target_parts[1])
+            source_book = resolve_book_name(source[0], book_names)
+            target_book = resolve_book_name(target[0], book_names)
+            reference_label = format_cross_reference(
+                (target_book, target[1], target[2]),
+                (
+                    (
+                        resolve_book_name(target_end[0], book_names),
+                        target_end[1],
+                        target_end[2],
+                    ) if target_end is not None else None
+                ),
+                book_names,
+            )
+            records.append((
+                normalize_cross_reference_source_id(source_name),
+                source_book,
+                source[1],
+                source[2],
+                reference_label,
+                target_book,
+                target[1],
+                target[2],
+                int(votes),
+            ))
+        except (TypeError, ValueError):
+            continue
+    return records
+
+
+def resolve_book_name(abbreviation, book_names):
+    if abbreviation in book_names:
+        return abbreviation
+    normalized = normalize_book_name(abbreviation)
+    target_name = CROSS_REFERENCE_BOOK_ALIASES.get(normalized, normalized)
+    matches = [
+        book_id for book_id, name in book_names.items()
+        if normalize_book_name(name).startswith(target_name)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Could not map cross-reference book abbreviation: {abbreviation}"
+        )
+    return matches[0]
+
+
+def get_cross_reference_sources():
+    sources = []
+    for path in CROSS_REFERENCE_FILES:
+        data = read_cross_reference_data(path)
+        source_name = data.get("source") or path.stem
+        label = data.get("label") or source_name
+        sources.append({
+            "id": normalize_cross_reference_source_id(source_name),
+            "label": str(label),
+            "path": str(path.relative_to(BASE_DIR)),
+        })
+    return sources
 
 
 def database_is_current(manifest):
@@ -346,6 +501,7 @@ def build_database(target, manifest):
             CREATE INDEX sermon_references_by_passage
                 ON sermon_references (normalized_name, chapter, verse);
             CREATE TABLE cross_references (
+                source_name TEXT NOT NULL,
                 source_book_id TEXT NOT NULL,
                 source_chapter INTEGER NOT NULL,
                 source_verse INTEGER NOT NULL,
@@ -355,8 +511,18 @@ def build_database(target, manifest):
                 target_verse INTEGER NOT NULL,
                 votes INTEGER NOT NULL,
                 PRIMARY KEY (
-                    source_book_id, source_chapter, source_verse,
+                    source_name, source_book_id, source_chapter, source_verse,
                     target_reference
+                )
+            ) WITHOUT ROWID;
+            CREATE TABLE cross_reference_notes (
+                source_name TEXT NOT NULL,
+                source_book_id TEXT NOT NULL,
+                source_chapter INTEGER NOT NULL,
+                source_verse INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                PRIMARY KEY (
+                    source_name, source_book_id, source_chapter, source_verse
                 )
             ) WITHOUT ROWID;
         """)
@@ -368,6 +534,7 @@ def build_database(target, manifest):
             ),
         )
 
+        translation_footnotes = load_footnote_sources()
         for translation_id, path in TRANSLATION_FILES.items():
             with gzip.open(path, "rt", encoding="utf-8") as source_file:
                 data = json.load(source_file)
@@ -389,6 +556,15 @@ def build_database(target, manifest):
                     (translation_id, book_id, name, book_order),
                 )
 
+            notes_by_chapter = {}
+            for note in translation_footnotes.get(translation_id, []):
+                chapter_num = note.get("chapter")
+                book_id = note.get("book_id") or note.get("bookId")
+                if (isinstance(book_id, str)
+                        and book_id
+                        and isinstance(chapter_num, int)):
+                    notes_by_chapter.setdefault((book_id, chapter_num), []).append(note)
+
             for item in data["chapters"]:
                 book_id = item.get("book_id")
                 chapter = item.get("chapter")
@@ -399,7 +575,10 @@ def build_database(target, manifest):
                 chapter_data = item.get("data", {})
                 source = chapter_data.get("chapter", {})
                 payload = encode_payload(make_bible_chapter(
-                    source, book_names[book_id], chapter
+                    source,
+                    book_names[book_id],
+                    chapter,
+                    notes_by_chapter.get((book_id, chapter), []),
                 ))
                 connection.execute(
                     "INSERT OR REPLACE INTO bible_chapters "
@@ -539,83 +718,64 @@ def build_database(target, manifest):
             ("BSB",),
         ).fetchall()
         book_names = {row[0]: row[1] for row in book_rows}
-        normalized_book_names = {
-            normalize_book_name(name): book_id
-            for book_id, name in book_names.items()
-        }
-        book_ids_by_abbreviation = {}
+        cross_reference_rows = []
+        cross_reference_files = [
+            path for path in sorted(CROSS_REFERENCES_DIR.glob("*.json.gz"))
+        ]
 
-        def resolve_book(abbreviation):
-            if abbreviation in book_ids_by_abbreviation:
-                return book_ids_by_abbreviation[abbreviation]
-            normalized = normalize_book_name(abbreviation)
-            target_name = CROSS_REFERENCE_BOOK_ALIASES.get(
-                normalized, normalized
-            )
-            matches = [
-                book_id for name, book_id in normalized_book_names.items()
-                if name.startswith(target_name)
-            ]
-            if len(matches) != 1:
-                raise ValueError(
-                    f"Could not map cross-reference book abbreviation: "
-                    f"{abbreviation}"
-                )
-            book_ids_by_abbreviation[abbreviation] = matches[0]
-            return matches[0]
-
-        with CROSS_REFERENCES_FILE.open(
-                encoding="utf-8", newline="") as source_file:
-            rows = csv.reader(source_file, delimiter="\t")
-            next(rows, None)
-            cross_reference_rows = []
-            for row in rows:
-                if len(row) < 3:
-                    raise ValueError(
-                        "Invalid cross-reference row: expected three columns"
-                    )
-                source = parse_reference(row[0])
-                target_parts = row[1].split("-", maxsplit=1)
-                target = parse_reference(target_parts[0])
-                target_end = (
-                    parse_reference(target_parts[1])
-                    if len(target_parts) == 2 else None
-                )
-                source_book = resolve_book(source[0])
-                target_book = resolve_book(target[0])
-                reference_label = format_cross_reference(
-                    (target_book, target[1], target[2]),
-                    (
-                        (
-                            resolve_book(target_end[0]),
-                            target_end[1],
-                            target_end[2],
-                        )
-                        if target_end is not None else None
-                    ),
-                    book_names,
-                )
-                cross_reference_rows.append((
-                    source_book, source[1], source[2], reference_label,
-                    target_book, target[1], target[2], int(row[2]),
-                ))
+        for path in cross_reference_files:
+            source_data = read_cross_reference_data(path)
+            source_name = source_data.get("source") or path.stem
+            source_id = normalize_cross_reference_source_id(source_name)
+            for row in iter_cross_reference_records(
+                    source_name, source_data, book_names):
+                cross_reference_rows.append(row)
                 if len(cross_reference_rows) >= 10000:
                     connection.executemany(
                         "INSERT OR REPLACE INTO cross_references "
-                        "(source_book_id, source_chapter, source_verse, "
+                        "(source_name, source_book_id, source_chapter, source_verse, "
                         "target_reference, target_book_id, target_chapter, "
-                        "target_verse, votes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "target_verse, votes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         cross_reference_rows,
                     )
                     cross_reference_rows.clear()
+            for note in source_data.get("notes", []):
+                if not isinstance(note, dict):
+                    continue
+                source_reference = note.get("source") or note.get(
+                    "source_reference"
+                )
+                text = note.get("text")
+                if not isinstance(source_reference, str) or not isinstance(text, str):
+                    continue
+                try:
+                    note_book, note_chapter, note_verse = parse_reference(
+                        source_reference
+                    )
+                    note_book_id = resolve_book_name(note_book, book_names)
+                except ValueError:
+                    continue
+                connection.execute(
+                    "INSERT OR REPLACE INTO cross_reference_notes "
+                    "(source_name, source_book_id, source_chapter, "
+                    "source_verse, text) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        source_id,
+                        note_book_id,
+                        note_chapter,
+                        note_verse,
+                        text,
+                    ),
+                )
             if cross_reference_rows:
                 connection.executemany(
                     "INSERT OR REPLACE INTO cross_references "
-                    "(source_book_id, source_chapter, source_verse, "
+                    "(source_name, source_book_id, source_chapter, source_verse, "
                     "target_reference, target_book_id, target_chapter, "
-                    "target_verse, votes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "target_verse, votes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     cross_reference_rows,
                 )
+                cross_reference_rows.clear()
         connection.commit()
 
 
@@ -736,27 +896,44 @@ def get_bible_chapter(translation_id, book_id, chapter):
             (translation_id, book_id, chapter),
         ).fetchone()
         cross_reference_rows = connection.execute(
-            "SELECT source_verse, target_reference, target_book_id, "
+            "SELECT source_name, source_verse, target_reference, target_book_id, "
             "target_chapter, target_verse "
             "FROM cross_references "
             "WHERE source_book_id = ? AND source_chapter = ? "
             "ORDER BY source_verse, votes DESC, target_reference",
             (book_id, chapter),
         ).fetchall()
+        cross_reference_note_rows = connection.execute(
+            "SELECT source_name, source_verse, text "
+            "FROM cross_reference_notes "
+            "WHERE source_book_id = ? AND source_chapter = ? "
+            "ORDER BY source_verse, source_name",
+            (book_id, chapter),
+        ).fetchall()
     if record is None:
         abort(404, description=f"Bible passage not found: {book['name']} {chapter}")
     payload = json.loads(zlib.decompress(record["payload"]))
     cross_references_by_verse = {}
+    cross_reference_notes_by_verse = {}
     for row in cross_reference_rows:
         cross_references_by_verse.setdefault(row["source_verse"], []).append({
+            "source": row["source_name"],
             "reference": row["target_reference"],
             "book_id": row["target_book_id"],
             "chapter": row["target_chapter"],
             "verse": row["target_verse"],
         })
+    for row in cross_reference_note_rows:
+        cross_reference_notes_by_verse.setdefault(row["source_verse"], []).append({
+            "source": row["source_name"],
+            "text": row["text"],
+        })
     for block in payload["blocks"]:
         for verse in block.get("verses", []):
             verse["cross_references"] = cross_references_by_verse.get(
+                verse["num"], []
+            )
+            verse["cross_reference_notes"] = cross_reference_notes_by_verse.get(
                 verse["num"], []
             )
     return jsonify(payload)
@@ -822,6 +999,11 @@ def get_sermons(book, chapter):
             sermons_by_id[row["sermon_id"]] = sermon
         sermon["verses"].append(row["verse"])
     return jsonify(list(sermons_by_id.values()))
+
+
+@app.route("/api/cross-reference-sources")
+def get_cross_reference_sources_api():
+    return jsonify(get_cross_reference_sources())
 
 
 @app.route(

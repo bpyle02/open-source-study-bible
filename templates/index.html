@@ -315,6 +315,7 @@
           <label><input type="color" id="accentColorPicker" value="#2b579a"> Accent Color</label>
           <label><input type="checkbox" id="verseByVerseToggle"> Verse-by-Verse</label>
           <label><input type="checkbox" id="redLetterToggle" checked> Red Letter</label>
+          <div id="crossReferenceSourceOptions" aria-label="Cross-reference sources"></div>
         </div>
       </div>
     </div>
@@ -395,6 +396,7 @@
     let verseMarkups = {};
     let currentMarkupColor = '#fff2a8';
     let minimized = {};
+    let crossReferenceSources = [];
     let requestId = 0;
 
     async function fetchJson(url) {
@@ -419,6 +421,7 @@
     async function init() {
       applySettings();
       try {
+        await loadCrossReferenceSources();
         translations = await fetchJson('/api/translations');
         for (const translation of translations) {
           const option = document.createElement('option');
@@ -436,6 +439,60 @@
       } catch (error) {
         showError(error);
       }
+    }
+
+    async function loadCrossReferenceSources() {
+      crossReferenceSources = await fetchJson('/api/cross-reference-sources');
+      const container = document.getElementById('crossReferenceSourceOptions');
+      const saved = JSON.parse(localStorage.getItem('crossReferenceSources') || '{}');
+      container.replaceChildren();
+      if (!crossReferenceSources.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-msg';
+        empty.textContent = 'No cross-reference sources available.';
+        container.appendChild(empty);
+        return;
+      }
+      for (const source of crossReferenceSources) {
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = `crossReferenceSource-${source.id}`;
+        checkbox.checked = saved[source.id] !== false;
+        checkbox.addEventListener('change', event => {
+          const settings = JSON.parse(localStorage.getItem('crossReferenceSources') || '{}');
+          settings[source.id] = event.target.checked;
+          localStorage.setItem('crossReferenceSources', JSON.stringify(settings));
+          if (selectedVerses.size === 1 && chapterData) {
+            const verseNumber = selectedVerses.values().next().value;
+            const verse = chapterData.blocks
+              .flatMap(block => block.verses || [])
+              .find(item => item.num === verseNumber);
+            if (verse) showVerseNotes(verse);
+          }
+        });
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(` ${source.label}`));
+        container.appendChild(label);
+      }
+    }
+
+    function getEnabledCrossReferenceSources() {
+      const saved = JSON.parse(localStorage.getItem('crossReferenceSources') || '{}');
+      const enabled = new Set();
+      for (const source of crossReferenceSources) {
+        if (saved[source.id] !== false) {
+          enabled.add(source.id);
+        }
+      }
+      return enabled;
+    }
+
+    function getEnabledCrossReferences(references) {
+      const enabled = getEnabledCrossReferenceSources();
+      return (references || []).filter(reference =>
+        enabled.has(reference.source || 'open-bible')
+      );
     }
 
     async function selectTranslation(translationId) {
@@ -604,8 +661,11 @@
 
     function showVerseNotes(verse) {
       const footnotes = verse.footnotes || [];
-      const crossReferences = verse.cross_references || [];
-      if (footnotes.length || crossReferences.length) {
+      const crossReferences = getEnabledCrossReferences(verse.cross_references);
+      const crossReferenceNotes = (verse.cross_reference_notes || []).filter(note =>
+        getEnabledCrossReferenceSources().has(note.source)
+      );
+      if (footnotes.length || crossReferences.length || crossReferenceNotes.length) {
         document.getElementById('fnLabel').textContent =
           `Notes & Cross-references — ${currentBook} ${currentChapter}:${verse.num}`;
         const content = document.getElementById('fnContent');
@@ -622,32 +682,130 @@
           entry.textContent = note;
           content.appendChild(entry);
         }
-        if (crossReferences.length) {
+        if (crossReferences.length || crossReferenceNotes.length) {
           const heading = document.createElement('div');
           heading.className = 'footnote-section-title';
           heading.textContent = 'Cross-references';
           content.appendChild(heading);
-          const list = document.createElement('ul');
-          list.className = 'cross-reference-list';
+          const sourcesById = new Map(
+            crossReferenceSources.map(source => [source.id, source.label])
+          );
+          const referencesBySource = new Map();
+          const notesBySource = new Map();
           for (const reference of crossReferences) {
-            const item = document.createElement('li');
-            const link = document.createElement('button');
-            link.type = 'button';
-            link.className = 'cross-reference-link';
-            link.textContent = reference.reference;
-            link.addEventListener('click', () => openCrossReference(reference));
-            item.appendChild(link);
-            list.appendChild(item);
+            const sourceId = reference.source || 'open-bible';
+            if (!referencesBySource.has(sourceId)) {
+              referencesBySource.set(sourceId, []);
+            }
+            referencesBySource.get(sourceId).push(reference);
           }
-          content.appendChild(list);
-          const attribution = document.createElement('p');
-          attribution.className = 'cross-reference-attribution';
-          attribution.textContent = 'Cross-references from OpenBible.info (CC-BY).';
-          content.appendChild(attribution);
+          for (const note of crossReferenceNotes) {
+            if (!notesBySource.has(note.source)) {
+              notesBySource.set(note.source, []);
+            }
+            notesBySource.get(note.source).push(note);
+          }
+          const sourceIds = new Set([
+            ...referencesBySource.keys(),
+            ...notesBySource.keys(),
+          ]);
+          const orderedSourceIds = [
+            ...crossReferenceSources
+              .map(source => source.id)
+              .filter(sourceId => sourceIds.has(sourceId)),
+            ...[...sourceIds].filter(sourceId =>
+              !crossReferenceSources.some(source => source.id === sourceId)
+            ),
+          ];
+          for (const sourceId of orderedSourceIds) {
+            const references = referencesBySource.get(sourceId) || [];
+            const sourceHeading = document.createElement('div');
+            sourceHeading.className = 'cross-reference-attribution';
+            sourceHeading.textContent = sourcesById.get(sourceId) || sourceId;
+            content.appendChild(sourceHeading);
+            const notes = notesBySource.get(sourceId) || [];
+            if (notes.length) {
+              for (const note of notes) {
+                const text = renderMarkdown(note.text, 'markdown');
+                linkifyCrossReferences(text, references);
+                content.appendChild(text);
+              }
+              continue;
+            }
+            const list = document.createElement('ul');
+            list.className = 'cross-reference-list';
+            for (const reference of references) {
+              const item = document.createElement('li');
+              const link = document.createElement('button');
+              link.type = 'button';
+              link.className = 'cross-reference-link';
+              link.textContent = reference.reference;
+              link.addEventListener('click', () => openCrossReference(reference));
+              item.appendChild(link);
+              list.appendChild(item);
+            }
+            content.appendChild(list);
+          }
         }
         footnotePopup.classList.add('visible');
       } else {
         footnotePopup.classList.remove('visible');
+      }
+    }
+
+    function linkifyCrossReferences(container, references) {
+      if (!references.length) return;
+      const referenceByLabel = new Map();
+      const patterns = [];
+      for (const reference of references) {
+        const escaped = reference.reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          .replace(/–/g, '[-–]');
+        patterns.push(escaped);
+        referenceByLabel.set(
+          reference.reference.replace(/[-–]/g, '–').toLocaleLowerCase(),
+          reference
+        );
+      }
+      const pattern = new RegExp(
+        `(^|[^A-Za-z0-9])(${patterns
+          .sort((left, right) => right.length - left.length)
+          .join('|')})(?![A-Za-z0-9])`,
+        'gi'
+      );
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      const textNodes = [];
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!node.parentElement.closest('a, button, code, pre')) {
+          textNodes.push(node);
+        }
+      }
+      for (const node of textNodes) {
+        const value = node.nodeValue;
+        pattern.lastIndex = 0;
+        if (!pattern.test(value)) continue;
+        pattern.lastIndex = 0;
+        const fragment = document.createDocumentFragment();
+        let cursor = 0;
+        for (const match of value.matchAll(pattern)) {
+          const prefixStart = match.index;
+          const labelStart = prefixStart + match[1].length;
+          fragment.appendChild(document.createTextNode(value.slice(cursor, labelStart)));
+          const link = document.createElement('button');
+          link.type = 'button';
+          link.className = 'cross-reference-link';
+          link.textContent = match[2];
+          const reference = referenceByLabel.get(
+            match[2].replace(/[-–]/g, '–').toLocaleLowerCase()
+          );
+          if (reference) {
+            link.addEventListener('click', () => openCrossReference(reference));
+          }
+          fragment.appendChild(link);
+          cursor = labelStart + match[2].length;
+        }
+        fragment.appendChild(document.createTextNode(value.slice(cursor)));
+        node.replaceWith(fragment);
       }
     }
 

@@ -19,8 +19,9 @@ JSON object has this top-level shape:
 - `chapters` is an array of chapter records. Each has `book_id`, an integer
   `chapter`, and a `data` object containing the source chapter information.
   The nested `data.chapter.content` array holds headings, verses, and other
-  content blocks; `data.chapter.footnotes` contains chapter footnotes where
-  available.
+  content blocks. Some translations include footnotes in
+  `data.chapter.footnotes`; BSB footnotes are stored separately in
+  `footnotes/bsb_footnotes.json.gz`.
 
 ## Book record
 
@@ -90,7 +91,9 @@ under `data.chapter.content`.
 Content blocks are source-defined. In particular, `heading` blocks have text
 in `content`, while `verse` blocks also have an integer `number`. Verse
 `content` can mix plain strings with objects such as `{"noteId": 0}`; that
-object refers to an item in the chapter's `footnotes` array.
+object refers to an item in the chapter's `footnotes` array where the source
+keeps footnotes embedded. BSB retains its note markers in verse content, with
+the corresponding notes stored separately in `footnotes/`.
 
 The app reads these files at startup to build its local database. Keep the
 translation ID, book IDs, and chapter numbers consistent throughout an
